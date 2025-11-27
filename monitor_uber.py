@@ -6,7 +6,7 @@ import os
 import json
 
 # Configuration
-UBER_BASE_URL = 'https://api.uber.com'
+UBER_BASE_URL = 'https://api.uber.com/v1'
 UBER_TOKEN = os.getenv('UBER_TOKEN')  # Required: Your Bearer token
 EMAIL_FROM = os.getenv('EMAIL_FROM', 'brumfidf@gmail.com')  # Default to your email
 EMAIL_TO = 'david@jjtexas.com,hr@jjtexas.com'  # Fixed recipients
@@ -27,6 +27,7 @@ STORE_NAMES = {
     '0be4dcab-b3c4-4c1d-a490-c965fa163eab': 'Stephenville',
     # Add 10th if needed: 'uuid-here': 'Store Name',
 }
+STORE_IDS = list(STORE_NAMES.keys())  # List of your 9 UUIDs for looping
 
 def get_store_name(store_id):
     return STORE_NAMES.get(store_id, store_id)  # Fallback to ID if unnamed
@@ -52,45 +53,46 @@ def send_email(subject, body):
     except Exception as e:
         print(f"Email failed: {e}")
 
-def fetch_deliveries(token):
-    """Fetch all yesterday's deliveries with pagination (across all stores)."""
+def fetch_all_deliveries(token):
+    """Fetch yesterday's deliveries per store using per-store API calls."""
     yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date()
     start_dt = yesterday.isoformat() + 'T00:00:00Z'
-    end_dt = yesterday.isoformat() + 'T23:59:59Z'  # Precise end for yesterday
+    end_dt = yesterday.isoformat() + 'T23:59:59Z'
     
     headers = {'Authorization': f'Bearer {token}'}
     all_deliveries = []
-    offset = 0
-    limit = 100
+    total_fetched = 0
     
-    while True:
+    for store_id in STORE_IDS:
         params = {
             'start_dt': start_dt,
-            'end_dt': end_dt,  # Use 'until_dt' if API requires it instead
-            'limit': str(limit),
-            'offset': str(offset)
+            'end_dt': end_dt
         }
-        response = requests.get(f'{UBER_BASE_URL}/v1/deliveries', headers=headers, params=params)
-        if response.status_code != 200:
-            print(f"API error: {response.status_code} - {response.text}")
-            return []
-        data = response.json()
-        deliveries = data.get('deliveries', [])
-        if not deliveries:
-            break
-        all_deliveries.extend(deliveries)
-        if len(deliveries) < limit:
-            break
-        offset += limit
+        # Updated path with /eats/ to match Uber Direct structure
+        url = f'{UBER_BASE_URL}/eats/customers/{store_id}/deliveries'
+        try:
+            response = requests.get(url, headers=headers, params=params)
+            if response.status_code != 200:
+                print(f"API error for {get_store_name(store_id)}: {response.status_code} - {response.text[:200]}...")  # Truncate for logs
+                continue
+            data = response.json()
+            deliveries = data.get('deliveries', [])  # Assuming 'deliveries' array in response
+            # Tag each delivery with store_id for analysis
+            tagged_deliveries = [{'store_id': store_id, **deliv} for deliv in deliveries]
+            all_deliveries.extend(tagged_deliveries)
+            total_fetched += len(deliveries)
+            print(f"Fetched {len(deliveries)} deliveries for {get_store_name(store_id)} on {yesterday}")
+        except Exception as e:
+            print(f"Error fetching for {get_store_name(store_id)}: {e}")
     
-    print(f"Fetched {len(all_deliveries)} deliveries for {yesterday} across all stores")
+    print(f"Total fetched: {total_fetched} across {len(STORE_IDS)} stores for {yesterday}")
     return all_deliveries
 
 def analyze_overuse(deliveries):
-    """Count deliveries per store (by external_store_id) and flag overuse."""
+    """Count deliveries per store and flag overuse."""
     store_counts = {}
     for deliv in deliveries:
-        store_id = deliv.get('external_store_id')
+        store_id = deliv.get('store_id')
         if store_id:
             store_counts[store_id] = store_counts.get(store_id, 0) + 1
     overusing_stores = [(store_id, count) for store_id, count in store_counts.items() if count >= 3]
@@ -105,8 +107,8 @@ def check_early_cancellations(token, deliveries):
         order_id = deliv.get('order_id') or deliv.get('delivery_id')
         status = deliv.get('status', '').upper()
         if 'CANCEL' in status or status == 'FAILED':
-            # Fetch details for confirmation
-            detail_url = f'{UBER_BASE_URL}/v1/eats/deliveries/orders/{order_id}'
+            # Detail endpoint (already under /eats/)
+            detail_url = f'{UBER_BASE_URL}/eats/deliveries/orders/{order_id}'
             try:
                 detail_resp = requests.get(detail_url, headers=headers)
                 if detail_resp.status_code == 200:
@@ -114,9 +116,11 @@ def check_early_cancellations(token, deliveries):
                     cancel_details = detail.get('cancellation_details', {})
                     last_status = cancel_details.get('last_known_delivery_status', '').upper()
                     if last_status in ['SCHEDULED', 'EN_ROUTE_TO_PICKUP']:
-                        store_id = deliv.get('external_store_id') or detail.get('external_store_id')
+                        store_id = deliv.get('store_id')
                         if store_id:
                             early_cancels[store_id] = early_cancels.get(store_id, 0) + 1
+                else:
+                    print(f"Detail fetch error for {order_id}: {detail_resp.status_code} - {detail_resp.text[:100]}...")
             except Exception as e:
                 print(f"Error fetching details for {order_id}: {e}")
     
@@ -128,13 +132,13 @@ if __name__ == '__main__':
         exit(1)
     
     print(f"Starting Uber Direct monitor for {datetime.now(timezone.utc).date()}")
-    deliveries = fetch_deliveries(UBER_TOKEN)
+    deliveries = fetch_all_deliveries(UBER_TOKEN)
     
     if not deliveries:
-        print("No data fetched - check API/token.")
+        print("No data fetched - check API/token or endpoints.")
         exit(0)
     
-    # Analyze (handles all stores automatically)
+    # Analyze (handles all 9 stores automatically)
     overusing = analyze_overuse(deliveries)
     early_cancels = check_early_cancellations(UBER_TOKEN, deliveries)
     
