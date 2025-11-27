@@ -68,8 +68,8 @@ def fetch_all_deliveries(token):
             'start_dt': start_dt,
             'end_dt': end_dt
         }
-        # Updated path with /eats/ to match Uber Direct structure
-        url = f'{UBER_BASE_URL}/eats/customers/{store_id}/deliveries'
+        # Path matching your example: /v1/customers/{store_id}/deliveries (no /eats/)
+        url = f'{UBER_BASE_URL}/customers/{store_id}/deliveries'
         try:
             response = requests.get(url, headers=headers, params=params)
             if response.status_code != 200:
@@ -105,10 +105,13 @@ def check_early_cancellations(token, deliveries):
     
     for deliv in deliveries:
         order_id = deliv.get('order_id') or deliv.get('delivery_id')
+        if not order_id:
+            continue
         status = deliv.get('status', '').upper()
         if 'CANCEL' in status or status == 'FAILED':
-            # Detail endpoint (already under /eats/)
-            detail_url = f'{UBER_BASE_URL}/eats/deliveries/orders/{order_id}'
+            # Detail endpoint scoped to store: /v1/customers/{store_id}/deliveries/{order_id}
+            store_id = deliv.get('store_id')
+            detail_url = f'{UBER_BASE_URL}/customers/{store_id}/deliveries/{order_id}'
             try:
                 detail_resp = requests.get(detail_url, headers=headers)
                 if detail_resp.status_code == 200:
@@ -116,13 +119,11 @@ def check_early_cancellations(token, deliveries):
                     cancel_details = detail.get('cancellation_details', {})
                     last_status = cancel_details.get('last_known_delivery_status', '').upper()
                     if last_status in ['SCHEDULED', 'EN_ROUTE_TO_PICKUP']:
-                        store_id = deliv.get('store_id')
-                        if store_id:
-                            early_cancels[store_id] = early_cancels.get(store_id, 0) + 1
+                        early_cancels[store_id] = early_cancels.get(store_id, 0) + 1
                 else:
-                    print(f"Detail fetch error for {order_id}: {detail_resp.status_code} - {detail_resp.text[:100]}...")
+                    print(f"Detail fetch error for {order_id} in {get_store_name(store_id)}: {detail_resp.status_code} - {detail_resp.text[:100]}...")
             except Exception as e:
-                print(f"Error fetching details for {order_id}: {e}")
+                print(f"Error fetching details for {order_id} in {get_store_name(store_id)}: {e}")
     
     return [(store_id, count) for store_id, count in early_cancels.items() if count > 0]
 
